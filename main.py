@@ -12,9 +12,7 @@ def get_files(directory):
     part_files = sorted([
         os.path.join(directory, f)
         for f in os.listdir(directory)
-        if '.part' in f
     ])
-    
     return part_files
 
 
@@ -55,11 +53,11 @@ def merge_chunks(output_file, chunk_files):
     print("[✓] All part files deleted.")
 
 
-async def upload_chunks(client, chunk_paths):
-    print(f"[+] Uploading {len(chunk_paths)} chunks...")
+async def upload_files(client, file_paths):
+    print(f"[+] Uploading {len(file_paths)} files...")
     metadata = []
 
-    for chunk_path in chunk_paths:
+    for chunk_path in file_paths:
         chunk_size = os.path.getsize(chunk_path)
         progress_bar = tqdm(total=chunk_size, unit='B', unit_scale=True, desc=os.path.basename(chunk_path))
 
@@ -77,29 +75,56 @@ async def upload_chunks(client, chunk_paths):
 
         metadata.append({
             "message_id": msg.id,
-            "filename": os.path.basename(chunk_path)
+            "filename": os.path.basename(chunk_path),
+            "size": chunk_size,
+            "date": msg.date.isoformat(),
         })
         print(f"  - Uploaded: {chunk_path}")
 
-    os.makedirs('manifests', exist_ok=True)
-    manifest_path = os.path.join('manifests', 'file_manifest.json')
-    with open(manifest_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    if os.path.exists(DEFAULT_MANIFEST):
+        with open(DEFAULT_MANIFEST, 'r') as f:
+            prev_metadata = json.load(f)
+    else:
+        prev_metadata = []
 
-    print(f"[✓] Upload complete. Metadata saved as {manifest_path}")
+    prev_metadata.extend(metadata)
+
+    with open(DEFAULT_MANIFEST, 'w') as f:
+        json.dump(prev_metadata, f, indent=2)
+
+    print(f"[✓] Upload complete. Metadata saved as {DEFAULT_MANIFEST}")
+
+    print(f"[+] Cleaning up local files...")
+    for file_path in file_paths:
+        try:
+            os.remove(file_path)
+            print(f"  - Deleted: {file_path}")
+        except Exception as e:
+            print(f"  ! Could not delete {file_path}: {e}")
+    print("[✓] All uploaded files deleted.")
 
 
-async def download_chunks(client, manifest_path):
-    print(f"[+] Downloading chunks from: {manifest_path}")
-    with open(manifest_path, 'r') as f:
+async def download_files(client):
+    print(f"[+] Downloading from: {DEFAULT_MANIFEST}")
+    with open(DEFAULT_MANIFEST, 'r') as f:
         manifest = json.load(f)
 
-    os.makedirs('downloads', exist_ok=True)
-    for entry in manifest:
-        msg = await client.get_messages(CHANNEL_USERNAME, ids=entry["message_id"])
-        out_path = os.path.join('downloads', entry["filename"])
-        await client.download_media(msg, file=out_path)
-        print(f"  - Downloaded: {entry['filename']}")
+    for i, entry in enumerate(manifest):
+        print(f"[{i:3}] {entry['filename']} ({entry['size']} bytes) - {entry['date']}")
+
+    index = input("[+] Choose file to download by entering its index\n")
+
+    if not index.isdigit() or int(index) < 0 or int(index) >= len(manifest):
+        print("[!] Invalid index. Exiting.")
+        return
+    
+    entry = manifest[int(index)]
+    print(f"[+] Downloading file: {entry['filename']}")
+
+    msg = await client.get_messages(CHANNEL_USERNAME, ids=entry["message_id"])
+    out_path = os.path.join(DEFAULT_DOWNLOADS_DIR, entry["filename"])
+    await client.download_media(msg, file=out_path)
+    print(f"  - Downloaded: {entry['filename']}")
     print("[✓] Download complete.")
 
 
@@ -107,37 +132,34 @@ def main():
     parser = argparse.ArgumentParser(description="Telegram File Splitter & Storage")
     subparsers = parser.add_subparsers(dest="command")
 
-    sp_split = subparsers.add_parser("split", help="Split large file")
-    sp_split.add_argument("filepath", help="Path to file to split")
+    sp_upload = subparsers.add_parser("upload", help="Upload files to Telegram")
+    sp_upload.add_argument(
+        "--dir",
+        default=DEFAULT_FILES_DIR,     
+        help="Directory containing files to upload (default: %(default)s)"
+    )
 
-    sp_upload = subparsers.add_parser("upload", help="Upload split chunks to Telegram")
-    sp_upload.add_argument("chunk_dir", help="Directory with .partXXX files")
-
-    sp_download = subparsers.add_parser("download", help="Download chunks using manifest")
-    sp_download.add_argument("manifest", help="Path to file_manifest.json")
-
-    sp_merge = subparsers.add_parser("merge", help="Merge downloaded chunks")
-    sp_merge.add_argument("output", help="Output file name")
-    sp_merge.add_argument("parts_dir", help="Directory with downloaded .part files")
+    subparsers.add_parser("download", help="Download files using manifest")
 
     args = parser.parse_args()
 
-    if args.command == "split":
-        split_file(args.filepath)
+    if args.command == "upload":
+        files = get_files(args.dir)
+        for file in files.copy():
+            if size:=os.path.getsize(file) > CHUNK_SIZE:
+                print(f"[!] File {file} is too large ({size} bytes). Splitting...")
+                files.extend(split_file(file))
+                files.remove(file)
 
-    elif args.command == "merge":
-        merge_chunks(args.output, get_files(args.parts_dir))
-
-    elif args.command == "upload":
         async def upload_main():
             async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
-                await upload_chunks(client, get_files(args.chunk_dir))
+                await upload_files(client, files)
         asyncio.run(upload_main())
 
     elif args.command == "download":
         async def download_main():
             async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
-                await download_chunks(client, args.manifest)
+                await download_files(client)
         asyncio.run(download_main())
     
     else:

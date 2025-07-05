@@ -13,9 +13,8 @@ venv/
 *.session-journal
 
 # Local files & folders
-chunks/
 downloads/
-manifests/
+files/
 file_manifest.json
 
 # OS files

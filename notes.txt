@@ -1,0 +1,8 @@
+update manifest:
+
+store small files
+store big files as one entry but with parts
+
+update download function according to this logic
+
+auto merge if downloaded splited file
