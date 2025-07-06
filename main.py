@@ -57,9 +57,12 @@ async def upload_files(client, file_paths):
     print(f"[+] Uploading {len(file_paths)} files...")
     metadata = []
 
-    for chunk_path in file_paths:
-        chunk_size = os.path.getsize(chunk_path)
-        progress_bar = tqdm(total=chunk_size, unit='B', unit_scale=True, desc=os.path.basename(chunk_path))
+    for path in file_paths:
+        file_size = os.path.getsize(path)
+        file_name = os.path.basename(path)
+        origin = file_name[:file_name.rfind(".part")] if ".part" in file_name else file_name
+
+        progress_bar = tqdm(total=file_size, unit='B', unit_scale=True, desc=file_name)
 
         def progress_callback(current, total):
             progress_bar.n = current
@@ -67,20 +70,22 @@ async def upload_files(client, file_paths):
 
         msg = await client.send_file(
             CHANNEL_USERNAME,
-            chunk_path,
-            caption=os.path.basename(chunk_path),
+            path,
+            caption=file_name,
             progress_callback=progress_callback
         )
         progress_bar.close()
 
+        print(f"  - Uploaded: {path}")
+
         metadata.append({
             "message_id": msg.id,
-            "filename": os.path.basename(chunk_path),
-            "size": chunk_size,
+            "filename": file_name,
+            "size": file_size,
             "date": msg.date.isoformat(),
+            "origin": origin 
         })
-        print(f"  - Uploaded: {chunk_path}")
-
+        
     if os.path.exists(DEFAULT_MANIFEST):
         with open(DEFAULT_MANIFEST, 'r') as f:
             prev_metadata = json.load(f)
@@ -94,14 +99,16 @@ async def upload_files(client, file_paths):
 
     print(f"[✓] Upload complete. Metadata saved as {DEFAULT_MANIFEST}")
 
-    print(f"[+] Cleaning up local files...")
-    for file_path in file_paths:
-        try:
-            os.remove(file_path)
-            print(f"  - Deleted: {file_path}")
-        except Exception as e:
-            print(f"  ! Could not delete {file_path}: {e}")
-    print("[✓] All uploaded files deleted.")
+    print(f"[+] Cleaning up '{DEFAULT_FILES_DIR}' folder...")
+    for filename in os.listdir(DEFAULT_FILES_DIR):
+        file_path = os.path.join(DEFAULT_FILES_DIR, filename)
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                print(f"  - Deleted: {file_path}")
+            except Exception as e:
+                print(f"  ! Could not delete {file_path}: {e}")
+    print("[✓] All files deleted.")
 
 
 async def download_files(client):
@@ -109,23 +116,42 @@ async def download_files(client):
     with open(DEFAULT_MANIFEST, 'r') as f:
         manifest = json.load(f)
 
-    for i, entry in enumerate(manifest):
-        print(f"[{i:3}] {entry['filename']} ({entry['size']} bytes) - {entry['date']}")
+    file_list = {}
 
-    index = input("[+] Choose file to download by entering its index\n")
+    for entry in manifest:
+        if entry["origin"] not in file_list:
+            files = list(filter(lambda x: x["origin"] == entry["origin"], manifest))
 
-    if not index.isdigit() or int(index) < 0 or int(index) >= len(manifest):
-        print("[!] Invalid index. Exiting.")
+            file_list[entry["origin"]] = {
+                                            "parts": files, 
+                                            "size": sum(x["size"] for x in files),
+                                            "date": entry["date"]
+                                        }
+
+    print("[+] Available files:")
+    for i, (origin, info) in enumerate(file_list.items()):  
+        print(f"{i:3}: {origin} ({info['size']} bytes) - date: {info['date']} ")
+        for j, part in enumerate(info['parts']):
+            print(f"\tPart {j}: {part['filename']}")
+
+    file = input("[+] Enter the name of file you want to download:").strip()
+
+    if not file_list.get(file):
+        print(f"[!] File '{file}' not found in manifest.")
         return
     
-    entry = manifest[int(index)]
-    print(f"[+] Downloading file: {entry['filename']}")
+    for part in (parts:=file_list[file]["parts"]):
+        print(f"[+] Downloading part: {part['filename']}")
 
-    msg = await client.get_messages(CHANNEL_USERNAME, ids=entry["message_id"])
-    out_path = os.path.join(DEFAULT_DOWNLOADS_DIR, entry["filename"])
-    await client.download_media(msg, file=out_path)
-    print(f"  - Downloaded: {entry['filename']}")
+        msg = await client.get_messages(CHANNEL_USERNAME, ids=part["message_id"])
+        out_path = os.path.join(DEFAULT_DOWNLOADS_DIR, part["filename"])
+        await client.download_media(msg, file=out_path)
+
     print("[✓] Download complete.")
+
+    if len(parts) > 1:
+        print(f"[+] Merging {len(parts)} parts into: {file}")
+        merge_chunks(os.path.join(DEFAULT_DOWNLOADS_DIR, file), [os.path.join(DEFAULT_DOWNLOADS_DIR, p["filename"]) for p in parts])
 
 
 def main():
